@@ -154,7 +154,7 @@ if password == "mjaleel":
             for col, (k, v) in zip(st.columns(len(stats)), stats.items()):
                 col.metric(k, f"{v:,}")
             legend = "🟢 تطابق الاثنين &nbsp; 🟡 تطابق واحد &nbsp; " if r["dual"] else ""
-            legend += "🟠 مكرر داخل القاعدة &nbsp; 🔴 لا تطابق"
+            legend += "🟠 تحقق يدوي &nbsp; 🔵 مرشح قريب &nbsp; 🔴 لا تطابق"
             if r["two_db"]:
                 legend += " &nbsp; 🟣 موجود في القاعدتين"
             st.markdown("💡 **ألوان الإكسل:** " + legend)
