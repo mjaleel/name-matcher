@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-نواة المطابقة المشتركة بين نسخة Streamlit ونسخة سطح المكتب.
+نواة المطابقة المشتركة بين نسخة Streamlit ونسخة سطح المكتب — الإصدار 2.
 
-- دوال المطابقة الأصلية (match_names / match_names_dual) منسوخة كما هي حرفياً.
-  الإضافة الوحيدة فيها: وسيط اختياري progress_cb لتحديث شريط التقدم، ولا يمس منطق المطابقة.
-- إضافة قاعدة ثانية: كل قاعدة تُطابَق بنفس الدوال الأصلية منفصلة، ثم تُدمج النتائج:
-    * وجد في قاعدة واحدة   -> تؤخذ نتيجتها كما هي + عمود "المصدر"
-    * وجد في القاعدتين      -> ⚠️ تعارض بين القاعدتين، لا يُختار أي منهما تلقائياً
-    * لم يوجد في أي منهما  -> ❌
+نفس الدوال ونفس الوسائط ونفس شكل النتائج والألوان، فلا يحتاج app_streamlit.py أي تعديل.
+
+ما تغيّر عن الإصدار الأول:
+1. التطبيع: حذف الكشيدة (ـ) والتشكيل، وتوحيد الحروف الفارسية (چ گ ک پ ڤ ی) و(ؤ ← و: رؤى = روى).
+2. لا يُقبل تطابق تقريبي إلا إذا تقابلت الكلمات كلمة بكلمة؛ الفرق المسموح فرق نقاط
+   أو حرفين متبادلين (حصاد/حماد، هيلم/هليم). كان شرط "النسبة ≥ 85 وأول ثلاث كلمات"
+   يقبل «علي نجم عبدالله جويج» على أنه «علي نجم عبدالله حسين».
+3. المطابقة بالبادئة على حدود الكلمات فقط، ويُشترط أن يكون اسم القاعدة رباعياً على الأقل
+   (الورقة فيها اللقب والقاعدة بدونه).
+4. إذا تقارب أكثر من شخص بنفس الدرجة: ⚠️ تحقق يدوياً بدل اختيار أحدهم بصمت.
+5. عمود جديد «تشابه قريب»: الكلمات التي اختلفت بين الاسمين، وأي شخص آخر قريب جداً،
+   أو مرشح قريب إذا لم يوجد تطابق مؤكد (❔). العتبات صارمة: لا يظهر إلا القريب فعلاً.
+6. القاعدتان: إذا وُجد الاسم في قاعدة ووُجد اسم قريب جداً في الأخرى يُعلَّم ⚠️ بنفس لون
+   التعارض، ويُضاف لورقة التعارضات.
 """
 import bisect
 import re
@@ -17,13 +25,17 @@ import pandas as pd
 from openpyxl.styles import PatternFill
 from rapidfuzz import fuzz, process
 
-# ============ دوال المساعدة (بدون أي تعديل عن الأصل) ============
+# ============ التطبيع ============
+
+_NOISE = re.compile(r'[ـً-ٰٟ]')          # كشيدة وتشكيل
+_PERSIAN = str.maketrans({'چ': 'ج', 'گ': 'ك', 'ک': 'ك', 'پ': 'ب', 'ڤ': 'ف', 'ی': 'ي', 'ؤ': 'و'})
+
 
 def normalize_name(name):
-    """تطبيع الاسم للمطابقة - الدالة الأصلية بدون تعديل"""
+    """تطبيع الاسم للمطابقة: قواعد الأصل + حذف الكشيدة والتشكيل + الحروف الفارسية"""
     if pd.isnull(name):
         return ""
-    name = str(name).strip()
+    name = _NOISE.sub('', str(name).strip()).translate(_PERSIAN)
     name = name.replace("ه", "ة").replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
     name = name.replace("ى", "ي").replace("ئ", "ي")
     name = re.sub(r'(عبد)([^\s])', r'\1 \2', name)
@@ -31,10 +43,10 @@ def normalize_name(name):
 
 
 def normalize_school_name(name):
-    """تطبيع أسماء المدارس (بدون أي تعديل عن الأصل)"""
+    """تطبيع أسماء المدارس (الأصل + حذف الكشيدة والحروف الفارسية)"""
     if pd.isnull(name):
         return ""
-    name = str(name).strip()
+    name = _NOISE.sub('', str(name).strip()).translate(_PERSIAN)
     name = re.sub(r'\bش\s*\.\s*', 'الشهيد ', name)
     name = re.sub(r'\b[اعمثبتر]\s*\.\s*', '', name)
     name = name.replace("ه", "ة").replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
@@ -69,6 +81,16 @@ def school_similarity(a, b):
 SCHOOL_THRESHOLD = 70
 PROGRESS_EVERY = 250
 
+# عتبات التشابه القريب (صارمة عمداً)
+CANDIDATE_THRESHOLD = 85     # مرشح قريب لاسم لم يُطابَق
+OTHER_CLOSE_THRESHOLD = 92   # شخص آخر قريب جداً من اسم مطابَق
+CROSS_DB_THRESHOLD = 88      # اسم قريب في القاعدة الأخرى
+WORD_THRESHOLD = 70          # أدنى تشابه لكلمة تُعدّ مقابلة لكلمة (فرق نقاط أو حرفان)
+STRONG_DIFF_COST = 0.6       # فرق كلمة لا يمنع التطابق التلقائي: نقطتان أو تبديل حرفين فقط
+
+NOTE_CANDIDATE = "❔ مرشح قريب - تحقق"
+NOTE_CLOSE_RIVALS = "⚠️ أكثر من اسم قريب بنفس الدرجة - تحقق يدوياً"
+
 
 def _tick(progress_cb, done, total):
     if progress_cb is not None and (done % PROGRESS_EVERY == 0 or done == total):
@@ -78,7 +100,220 @@ def _tick(progress_cb, done, total):
             pass  # تحديث الواجهة لا يجوز أن يوقف المطابقة
 
 
-# ============ دوال المطابقة الأصلية (المنطق كما هو حرفياً) ============
+# ============ تشابه الكلمات ============
+
+_CLS = {}
+for _k, _v in (('ب', 'بتثنيى'), ('ح', 'جحخ'), ('د', 'دذ'), ('ر', 'رز'), ('س', 'سش'),
+               ('ص', 'صض'), ('ط', 'طظ'), ('ع', 'عغ'), ('ف', 'فق'), ('ه', 'هة')):
+    for _c in _v:
+        _CLS[_c] = _k
+
+
+def _word_cost(a, b):
+    """تكلفة التحويل بين كلمتين: حرف متشابه بالنقاط 0.3، حرفان متبادلان 0.5، حرف مختلف فعلاً 1"""
+    if a == b:
+        return 0.0
+    n, m = len(a), len(b)
+    if not n or not m:
+        return float(max(n, m))
+    prev2 = None
+    prev = list(range(m + 1))
+    for i in range(1, n + 1):
+        cur = [i] + [0] * m
+        x = a[i - 1]
+        for j in range(1, m + 1):
+            y = b[j - 1]
+            sub = 0 if x == y else (0.3 if _CLS.get(x, x) == _CLS.get(y, y) else 1)
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + sub)
+            if prev2 is not None and j > 1 and x == b[j - 2] and a[i - 2] == y and x != y:
+                v = min(v, prev2[j - 2] + 0.5)
+            cur[j] = v
+        prev2, prev = prev, cur
+    return prev[m]
+
+
+def _word_sim(a, b):
+    """تشابه كلمتين 0-100"""
+    if a == b:
+        return 100.0
+    n, m = len(a), len(b)
+    if not n or not m:
+        return 0.0
+    return 100.0 * (1 - _word_cost(a, b) / max(n, m))
+
+
+def _words_agree(qw, cw):
+    """تقابل كلمة بكلمة على الجزء المشترك. يعيد (عدد الكلمات المختلفة, عدد الكلمات المقارنة, الفروق) أو None"""
+    k = min(len(qw), len(cw))
+    diffs = []
+    for i in range(k):
+        if qw[i] == cw[i]:
+            continue
+        if _word_sim(qw[i], cw[i]) < WORD_THRESHOLD:
+            return None
+        diffs.append((qw[i], cw[i]))
+    if len(diffs) > 2:
+        return None
+    return len(diffs), k, diffs
+
+
+def _weak(diffs):
+    """هل في الفروق حرف مختلف فعلاً (لا مجرد نقاط أو تبديل)؟ مثل جاسب/جاسم"""
+    return any(_word_cost(a, b) > STRONG_DIFF_COST for a, b in diffs)
+
+
+def _align_score(qw, cw):
+    """تشابه اسمين 0-100 يتحمل كلمة ناقصة أو كلمتين ملتصقتين؛ الاسم الأول وزنه مضاعف"""
+    n, m = len(qw), len(cw)
+    INF = 1e9
+    C = [[INF] * (m + 1) for _ in range(n + 1)]
+    C[0][0] = 0.0
+    for i in range(n + 1):
+        for j in range(m + 1):
+            c0 = C[i][j]
+            if c0 >= INF:
+                continue
+            w = 2 if (i == 0 and j == 0) else 1
+            if i < n and j < m:
+                C[i + 1][j + 1] = min(C[i + 1][j + 1], c0 + w * (1 - _word_sim(qw[i], cw[j]) / 100))
+            if i < n:   # كلمة في الورقة فقط
+                C[i + 1][j] = min(C[i + 1][j], c0 + (0.15 if j == m else (2 if i == 0 else 0.6)))
+            if j < m:   # كلمة في القاعدة فقط
+                C[i][j + 1] = min(C[i][j + 1], c0 + (0.3 if i == n else (2 if j == 0 else 0.6)))
+            if i + 1 < n and j < m:
+                C[i + 2][j + 1] = min(C[i + 2][j + 1], c0 + 0.1 + (1 - _word_sim(qw[i] + qw[i + 1], cw[j]) / 100))
+            if i < n and j + 1 < m:
+                C[i + 1][j + 2] = min(C[i + 1][j + 2], c0 + 0.1 + (1 - _word_sim(qw[i], cw[j] + cw[j + 1]) / 100))
+    return max(0.0, 100 * (1 - C[n][m] / max(3, min(n, m) + 1)))
+
+
+# ============ فهرس القاعدة ============
+
+class _Index:
+    """يُبنى مرة واحدة لكل قاعدة: بحث سريع بدون مقارنة كل اسم بكل اسم"""
+
+    def __init__(self, names_in_order):
+        self.names = list(names_in_order)
+        self.set = set(self.names)
+        self.sorted = sorted(self.names)
+        self.first3 = {}
+        for nm in self.names:
+            self.first3.setdefault(get_first_three_words(nm), []).append(nm)
+
+    def _starting_with(self, n):
+        key = n + " "
+        lo = bisect.bisect_left(self.sorted, key)
+        out = []
+        for i in range(lo, min(lo + 50, len(self.sorted))):
+            if not self.sorted[i].startswith(key):
+                break
+            out.append(self.sorted[i])
+        return out
+
+    def _pool(self, n, qw):
+        pool = set(self.first3.get(get_first_three_words(n), []))
+        pool.update(self._starting_with(n))
+        for k in range(len(qw) - 1, 2, -1):          # الورقة فيها لقب والقاعدة بدونه
+            p = " ".join(qw[:k])
+            if p in self.set:
+                pool.add(p)
+        # أقرب الأسماء بالحروف، للاسم كاملاً وبدون آخر كلمة وآخر كلمتين
+        for k in (len(qw), len(qw) - 1, len(qw) - 2):
+            if k >= 3:
+                for c, _, _ in process.extract(" ".join(qw[:k]), self.names, scorer=fuzz.ratio,
+                                               limit=12, score_cutoff=70):
+                    pool.add(c)
+        return pool
+
+    def find(self, n):
+        """
+        يعيد dict:
+          best: الاسم المطابق (مطبّعاً) أو None
+          score: النسبة
+          rivals: أسماء بنفس الدرجة تقريباً (تحتاج تحقق يدوي)
+          diffs: الكلمات المختلفة بين الورقة والقاعدة
+          candidate: (اسم, نسبة) مرشح قريب حين لا يوجد تطابق مؤكد
+          close: [(اسم, نسبة)] أشخاص آخرون قريبون جداً
+        """
+        res = dict(best=None, score=0, rivals=[], diffs=[], candidate=None, close=[], paper_longer=False)
+        if not n:
+            return res
+        qw = n.split()
+        if n in self.set:
+            res.update(best=n, score=100)
+            pool = self._pool(n, qw)
+        else:
+            pool = self._pool(n, qw)
+            ok = []
+            for c in pool:
+                cw = c.split()
+                if len(cw) < 3:
+                    continue
+                g = _words_agree(qw, cw)
+                if not g or g[1] < 3:
+                    continue
+                if len(cw) < len(qw) and len(cw) < 4:     # القاعدة أقصر: يجب أن تكون رباعية على الأقل
+                    continue
+                shared = fuzz.ratio(" ".join(qw[:g[1]]), " ".join(cw[:g[1]]))
+                # (فرق قوي؟, كلمات مقارنة, عدد الفروق, نسبة الجزء المشترك, الاسم, الفروق)
+                ok.append((_weak(g[2]), g[1], g[0], shared, c, g[2]))
+            # الفروق القوية (نقاط/تبديل) أولاً، ثم الأكثر كلمات مقارنة، ثم الأقل فروقاً
+            ok.sort(key=lambda t: (t[0], -t[1], t[2], -t[3]))
+            if ok:
+                weak, k, soft, sc, c, diffs = ok[0]
+                res.update(diffs=diffs, paper_longer=len(c.split()) < len(qw))
+                if weak:
+                    # حرف مختلف فعلاً (جاسب/جاسم): لا يُقبل تلقائياً، يُعرض مرشحاً قريباً فقط
+                    if sc >= CANDIDATE_THRESHOLD:
+                        res["candidate"] = (c, round(sc))
+                else:
+                    res.update(best=c, score=sc)
+                    res["rivals"] = [o[4] for o in ok[1:] if not o[0] and o[1] == k
+                                     and o[2] <= soft + 1 and sc - o[3] < 6]
+        # تشابه قريب: أشخاص آخرون، أو مرشح لاسم لم يُطابَق
+        scored = []
+        for c in pool:
+            if c == res["best"] or c in res["rivals"] or (res["candidate"] and c == res["candidate"][0]):
+                continue
+            cw = c.split()
+            if _word_sim(qw[0], cw[0]) < 80:               # الاسم الأول مختلف = شخص آخر
+                continue
+            if len(qw) > 1 and len(cw) > 1 and _word_sim(qw[1], cw[1]) < WORD_THRESHOLD:
+                continue                                    # اسم الأب مختلف = شخص آخر (لا مرشح بعيد)
+            scored.append((c, round(_align_score(qw, cw))))
+        scored.sort(key=lambda t: -t[1])
+        if res["best"] is None:
+            if res["candidate"]:
+                res["close"] = [s for s in scored[:2] if s[1] >= CANDIDATE_THRESHOLD]
+            elif scored and scored[0][1] >= CANDIDATE_THRESHOLD:
+                res["candidate"] = scored[0]
+                res["close"] = [s for s in scored[1:3] if s[1] >= CANDIDATE_THRESHOLD]
+        else:
+            res["close"] = [s for s in scored[:2] if s[1] >= OTHER_CLOSE_THRESHOLD]
+        return res
+
+
+def _show(w):
+    """الكلمة المطبّعة للعرض: التطبيع يحوّل ه إلى ة، فنعيدها كما يكتبها الناس"""
+    return w.replace("ة", "ه")
+
+
+def _similarity_note(res, label_of):
+    """نص عمود «تشابه قريب»"""
+    parts = []
+    if res["diffs"]:
+        parts.append("اختلاف حرفي: " + "، ".join(f"{_show(a)} ← {_show(b)}" for a, b in res["diffs"]))
+    if res["paper_longer"]:
+        parts.append("في الورقة كلمات زائدة (اللقب)")
+    if res["candidate"]:
+        c, s = res["candidate"]
+        parts.append(f"مرشح قريب: {label_of(c)} ({s}%)")
+    for c, s in res["close"]:
+        parts.append(f"اسم قريب آخر: {label_of(c)} ({s}%)")
+    return " | ".join(parts)
+
+
+# ============ المطابقة ============
 
 def match_names(names_df, database_df, name_column_file, name_column_db,
                 selected_columns=None, progress_cb=None):
@@ -91,92 +326,47 @@ def match_names(names_df, database_df, name_column_file, name_column_db,
     duplicate_names = set(
         database_df["normalized_name"][database_df["normalized_name"].duplicated(keep=False)]
     )
-
     database_df = database_df.drop_duplicates(subset=["normalized_name"])
+    database_df = database_df[database_df["normalized_name"] != ""]
 
     columns_to_get = [name_column_db]
     if selected_columns:
         columns_to_get.extend([col for col in selected_columns if col != name_column_db])
 
     database_map = database_df.set_index("normalized_name")[columns_to_get].to_dict(orient="index")
-    db_names_list = list(database_map.keys())
-    db_names_set = set(db_names_list)
-
-    db_names_sorted = sorted(db_names_list)
-    rank = {name: i for i, name in enumerate(db_names_list)}
-
-    def find_prefix_match(normalized_name):
-        candidates = []
-        lo = bisect.bisect_left(db_names_sorted, normalized_name)
-        hi = bisect.bisect_left(db_names_sorted, normalized_name + '￿')
-        candidates.extend(db_names_sorted[lo:hi])
-        for i in range(1, len(normalized_name) + 1):
-            prefix = normalized_name[:i]
-            if prefix in db_names_set:
-                candidates.append(prefix)
-        if not candidates:
-            return None
-        return min(candidates, key=lambda c: rank[c])
+    index = _Index(database_map.keys())
+    label_of = lambda c: database_map[c][name_column_db]
 
     matched_results = []
     total = len(names_df)
-
     for n, (original_name, normalized_name) in enumerate(
             zip(names_df[name_column_file], names_df["normalized_name"]), 1):
-        best_match = None
-        best_score = 0
-        match_data = None
-
-        if normalized_name in db_names_set:
-            best_match = normalized_name
-            best_score = 100
-            match_data = database_map[best_match]
+        res = index.find(normalized_name)
+        result = {"الاسم الأصلي": original_name, "الاسم المطابق": "", "نسبة التطابق": "", "ملاحظة": ""}
+        data = None
+        if res["best"] and not res["rivals"]:
+            data = database_map[res["best"]]
+            result["ملاحظة"] = ("⚠️ تطابق لكن يوجد أكثر من شخص بنفس الاسم - تحقق يدوياً"
+                               if res["best"] in duplicate_names else "✅ تطابق")
+            result["نسبة التطابق"] = f"{round(res['score'])}%"
+        elif res["best"]:
+            result["ملاحظة"] = NOTE_CLOSE_RIVALS
+            res["close"] = [(c, round(_align_score(normalized_name.split(), c.split())))
+                            for c in [res["best"]] + res["rivals"]][:3]
+            res["diffs"] = []
+        elif res["candidate"]:
+            data = database_map[res["candidate"][0]]
+            result["ملاحظة"] = NOTE_CANDIDATE
+            result["نسبة التطابق"] = f"{res['candidate'][1]}%"
         else:
-            result_extract = process.extractOne(
-                normalized_name, db_names_list, scorer=fuzz.ratio
-            )
-            if result_extract:
-                best_match, best_score, _ = result_extract
-
-            if best_score >= 85 and best_match:
-                if is_first_three_words_match(normalized_name, best_match) or best_match.startswith(normalized_name):
-                    match_data = database_map[best_match]
-
-            if not match_data:
-                db_name = find_prefix_match(normalized_name)
-                if db_name is not None:
-                    match_data = database_map[db_name]
-                    best_match = db_name
-                    best_score = fuzz.ratio(normalized_name, best_match)
-
-        if match_data:
-            note = "✅ تطابق"
-            if best_match in duplicate_names:
-                note = "⚠️ تطابق لكن يوجد أكثر من شخص بنفس الاسم - تحقق يدوياً"
-
-            result = {
-                "الاسم الأصلي": original_name,
-                "الاسم المطابق": match_data[name_column_db],
-                "نسبة التطابق": f"{round(best_score)}%",
-                "ملاحظة": note
-            }
-            if selected_columns:
-                for col in selected_columns:
-                    if col in match_data:
-                        result[col] = match_data[col]
-            matched_results.append(result)
-        else:
-            result = {
-                "الاسم الأصلي": original_name,
-                "الاسم المطابق": "",
-                "نسبة التطابق": "",
-                "ملاحظة": "❌ لم يتم العثور على تطابق"
-            }
-            if selected_columns:
-                for col in selected_columns:
-                    result[col] = ""
-            matched_results.append(result)
-
+            result["ملاحظة"] = "❌ لم يتم العثور على تطابق"
+        if data:
+            result["الاسم المطابق"] = data[name_column_db]
+        result["تشابه قريب"] = _similarity_note(res, label_of)
+        if selected_columns:
+            for col in selected_columns:
+                result[col] = data.get(col, "") if data else ""
+        matched_results.append(result)
         _tick(progress_cb, n, total)
 
     return pd.DataFrame(matched_results)
@@ -201,30 +391,15 @@ def match_names_dual(names_df, database_df, name_column_file, name_column_db,
     name_idx = database_df.columns.get_loc("normalized_name")
     for row in database_df.itertuples(index=False, name=None):
         key = row[name_idx]
+        if not key:
+            continue
         entry = {c: row[idx] for c, idx in cols_idx.items()}
         name_groups.setdefault(key, []).append(entry)
 
-    db_unique_names = list(name_groups.keys())
-    db_unique_names_set = set(db_unique_names)
-
-    db_names_sorted = sorted(db_unique_names)
-    rank = {name: i for i, name in enumerate(db_unique_names)}
-
-    def find_prefix_match(normalized_name):
-        candidates_names = []
-        lo = bisect.bisect_left(db_names_sorted, normalized_name)
-        hi = bisect.bisect_left(db_names_sorted, normalized_name + '￿')
-        candidates_names.extend(db_names_sorted[lo:hi])
-        for i in range(1, len(normalized_name) + 1):
-            prefix = normalized_name[:i]
-            if prefix in db_unique_names_set:
-                candidates_names.append(prefix)
-        if not candidates_names:
-            return None
-        return min(candidates_names, key=lambda c: rank[c])
+    index = _Index(name_groups.keys())
+    label_of = lambda c: name_groups[c][0][name_column_db]
 
     matched_results = []
-
     file_cols = [name_column_file, "normalized_name", second_col_file, "normalized_school"]
     file_idx = {c: names_df.columns.get_loc(c) for c in file_cols}
     total = len(names_df)
@@ -235,53 +410,40 @@ def match_names_dual(names_df, database_df, name_column_file, name_column_db,
         original_school = row[file_idx[second_col_file]]
         normalized_school = row[file_idx["normalized_school"]]
 
-        best_match = None
-        best_score = 0
-        candidates = []
-
-        if normalized_name in db_unique_names_set:
-            best_match = normalized_name
-            best_score = 100
-            candidates = name_groups[best_match]
-        else:
-            result_extract = process.extractOne(
-                normalized_name, db_unique_names, scorer=fuzz.ratio
-            )
-            if result_extract:
-                best_match, best_score, _ = result_extract
-
-            if best_score >= 85 and best_match:
-                if is_first_three_words_match(normalized_name, best_match) or best_match.startswith(normalized_name):
-                    candidates = name_groups[best_match]
-
-            if not candidates:
-                found = find_prefix_match(normalized_name)
-                if found is not None:
-                    candidates = name_groups[found]
-                    best_match = found
-                    best_score = fuzz.ratio(normalized_name, best_match)
-
+        res = index.find(normalized_name)
         chosen = None
         note_name = "❌ لم يتم العثور على تطابق"
-        matched_school_display = ""
-        school_score_display = ""
         note_school = "❌ لم يتم العثور على تطابق"
+        matched_school_display = school_score_display = ""
+        score_display = ""
 
-        if len(candidates) == 1:
-            chosen = candidates[0]
-            note_name = "✅ تطابق"
-        elif len(candidates) > 1:
-            scored = [
-                (c, school_similarity(normalized_school, c["normalized_school"]))
-                for c in candidates
-            ]
-            qualified = [c for c, s in scored if s >= SCHOOL_THRESHOLD]
-            if len(qualified) == 1:
-                chosen = qualified[0]
-                note_name = "✅ تطابق (تم الفصل بواسطة المدرسة)"
+        target, candidate_mode = None, False
+        if res["best"] and not res["rivals"]:
+            target = res["best"]
+        elif res["best"]:
+            note_name = NOTE_CLOSE_RIVALS
+            note_school = "⚠️ بانتظار تحقق يدوي"
+            res["close"] = [(c, round(_align_score(normalized_name.split(), c.split())))
+                            for c in [res["best"]] + res["rivals"]][:3]
+            res["diffs"] = []
+        elif res["candidate"]:
+            target, candidate_mode = res["candidate"][0], True
+
+        if target:
+            candidates = name_groups[target]
+            if len(candidates) == 1:
+                chosen = candidates[0]
+                note_name = NOTE_CANDIDATE if candidate_mode else "✅ تطابق"
             else:
-                note_name = "⚠️ تطابق الاسم لكن يوجد أكثر من شخص بنفس الاسم - تحقق يدوياً"
-                note_school = "⚠️ بانتظار تحقق يدوي"
+                scored = [(c, school_similarity(normalized_school, c["normalized_school"])) for c in candidates]
+                qualified = [c for c, s in scored if s >= SCHOOL_THRESHOLD]
+                if len(qualified) == 1:
+                    chosen = qualified[0]
+                    note_name = NOTE_CANDIDATE if candidate_mode else "✅ تطابق (تم الفصل بواسطة المدرسة)"
+                else:
+                    note_name = "⚠️ تطابق الاسم لكن يوجد أكثر من شخص بنفس الاسم - تحقق يدوياً"
+                    note_school = "⚠️ بانتظار تحقق يدوي"
+            score_display = f"{res['candidate'][1]}%" if candidate_mode else f"{round(res['score'])}%"
 
         if chosen:
             sc = school_similarity(normalized_school, chosen["normalized_school"])
@@ -292,14 +454,14 @@ def match_names_dual(names_df, database_df, name_column_file, name_column_db,
         result = {
             "الاسم الأصلي": original_name,
             "الاسم المطابق": chosen[name_column_db] if chosen else "",
-            "نسبة تطابق الاسم": f"{round(best_score)}%" if candidates else "",
+            "نسبة تطابق الاسم": score_display,
             "ملاحظة الاسم": note_name,
+            "تشابه قريب": _similarity_note(res, label_of),
             f"{second_col_file} (الأصلي)": original_school,
             f"{second_col_db} (المطابق)": matched_school_display,
             "نسبة تطابق المدرسة": school_score_display,
             "ملاحظة المدرسة": note_school,
         }
-
         if selected_columns:
             for col in selected_columns:
                 result[col] = chosen.get(col, "") if chosen else ""
@@ -310,20 +472,23 @@ def match_names_dual(names_df, database_df, name_column_file, name_column_db,
     return pd.DataFrame(matched_results)
 
 
-# ============ القاعدتان: تشغيل الأصل على كل قاعدة ثم الدمج ============
+# ============ القاعدتان ============
 
 CONFLICT_MARK = "القاعدتين"
 NOT_FOUND = "❌ لم يتم العثور على تطابق"
 
 
 def _found(note):
-    """هل وُجد الاسم في هذه القاعدة؟ (✅ تطابق أو ⚠️ مكرر داخل نفس القاعدة)"""
+    """هل وُجد الاسم في هذه القاعدة؟ (✅ تطابق أو ⚠️ تحقق داخل نفس القاعدة)"""
     note = str(note)
     return ("✅" in note) or ("⚠️" in note)
 
 
+def _is_candidate(note):
+    return "❔" in str(note)
+
+
 def _sub_progress(progress_cb, part, parts):
-    """تحويل تقدم مطابقة قاعدة واحدة إلى تقدم كلي"""
     if progress_cb is None:
         return None
 
@@ -349,13 +514,25 @@ def cross_database_names(db1, db2, name_col1, name_col2, label1, label2,
     return common.drop(columns=["normalized_name"]).reset_index(drop=True)
 
 
+def _pct(v):
+    try:
+        return int(str(v).rstrip("%"))
+    except ValueError:
+        return 0
+
+
 def match_two_databases(names_df, db1, db2, name_col_file, name_col1, name_col2,
                         label1="الملاك", label2="العقود",
                         second_col_file=None, second_col1=None, second_col2=None,
                         selected_columns=None, progress_cb=None):
     """
     يعيد: (النتائج الموحدة, جدول التعارضات, جدول الأسماء المشتركة بين القاعدتين)
-    كل قاعدة تُطابق بالدالة الأصلية نفسها دون أي تغيير في الشروط.
+    كل قاعدة تُطابق منفصلة ثم تُدمج:
+      * في قاعدة واحدة فقط                     -> نتيجتها + عمود "المصدر"
+      * في القاعدتين                           -> ⚠️ تعارض، لا يُختار أي منهما تلقائياً
+      * في قاعدة، ومرشح قريب جداً في الأخرى     -> نتيجة القاعدة + ⚠️ تنبيه تشابه بين القاعدتين
+      * لا تطابق مؤكد، ومرشح قريب في إحداهما     -> ❔ مرشح قريب
+      * لا شيء                                 -> ❌
     """
     selected_columns = list(selected_columns or [])
     dual = bool(second_col_file and second_col1 and second_col2)
@@ -376,14 +553,15 @@ def match_two_databases(names_df, db1, db2, name_col_file, name_col1, name_col2,
         r2 = r2.rename(columns={f"{second_col_file} (الأصلي)": "المدرسة (الأصلية)",
                                 f"{second_col2} (المطابق)": "المدرسة (المطابقة)"})
         base_cols = ["الاسم الأصلي", "المصدر", "الاسم المطابق", "نسبة تطابق الاسم", "ملاحظة الاسم",
-                     "المدرسة (الأصلية)", "المدرسة (المطابقة)", "نسبة تطابق المدرسة", "ملاحظة المدرسة"]
+                     "تشابه قريب", "المدرسة (الأصلية)", "المدرسة (المطابقة)", "نسبة تطابق المدرسة",
+                     "ملاحظة المدرسة"]
     else:
         r1 = match_names(names_df, db1, name_col_file, name_col1, sel1,
                          _sub_progress(progress_cb, 0, 2))
         r2 = match_names(names_df, db2, name_col_file, name_col2, sel2,
                          _sub_progress(progress_cb, 1, 2))
         note_col, score_col = "ملاحظة", "نسبة التطابق"
-        base_cols = ["الاسم الأصلي", "المصدر", "الاسم المطابق", "نسبة التطابق", "ملاحظة"]
+        base_cols = ["الاسم الأصلي", "المصدر", "الاسم المطابق", "نسبة التطابق", "ملاحظة", "تشابه قريب"]
 
     out_cols = base_cols + selected_columns + [f"مطابقة {label1}", f"مطابقة {label2}"]
     rows, conflicts = [], []
@@ -391,13 +569,39 @@ def match_two_databases(names_df, db1, db2, name_col_file, name_col1, name_col2,
     recs2 = r2.to_dict("records")
 
     def brief(rec):
-        if not _found(rec[note_col]):
+        if not (_found(rec[note_col]) or _is_candidate(rec[note_col])):
             return ""
         nm = rec["الاسم المطابق"] or "(عدة أشخاص بنفس الاسم)"
-        return f"{nm} ({rec[score_col]})"
+        tag = " - مرشح" if _is_candidate(rec[note_col]) else ""
+        return f"{nm} ({rec[score_col]}){tag}"
+
+    def conflict_row(a, b, kind):
+        c = {"نوع التعارض": kind, "الاسم الأصلي": a["الاسم الأصلي"]}
+        if dual:
+            c["المدرسة (الأصلية)"] = a["المدرسة (الأصلية)"]
+        for lbl, rec, sel in ((label1, a, sel1), (label2, b, sel2)):
+            c[f"الاسم المطابق - {lbl}"] = rec["الاسم المطابق"]
+            c[f"النسبة - {lbl}"] = rec[score_col]
+            c[f"الملاحظة - {lbl}"] = rec[note_col]
+            if dual:
+                c[f"المدرسة - {lbl}"] = rec["المدرسة (المطابقة)"]
+                c[f"نسبة المدرسة - {lbl}"] = rec["نسبة تطابق المدرسة"]
+            for col in sel:
+                c[f"{col} - {lbl}"] = rec.get(col, "")
+        return c
+
+    def copy_rec(out, rec, lbl):
+        for col in base_cols:
+            if col in rec:
+                out[col] = rec[col]
+        out["المصدر"] = lbl
+        for col in selected_columns:
+            if col in rec:
+                out[col] = rec[col]
 
     for a, b in zip(recs1, recs2):
         f1, f2 = _found(a[note_col]), _found(b[note_col])
+        c1, c2 = _is_candidate(a[note_col]), _is_candidate(b[note_col])
         out = {c: "" for c in out_cols}
         out["الاسم الأصلي"] = a["الاسم الأصلي"]
         out[f"مطابقة {label1}"] = brief(a)
@@ -414,32 +618,35 @@ def match_two_databases(names_df, db1, db2, name_col_file, name_col1, name_col2,
                 where = [lbl for lbl, ok in ((label1, s1), (label2, s2)) if ok]
                 out["ملاحظة المدرسة"] = ("⚠️ المدرسة تطابق في: " + " و".join(where)) if where \
                     else "⚠️ بانتظار تحقق يدوي"
-            c = {"الاسم الأصلي": a["الاسم الأصلي"]}
-            if dual:
-                c["المدرسة (الأصلية)"] = a["المدرسة (الأصلية)"]
-            for lbl, rec, sel in ((label1, a, sel1), (label2, b, sel2)):
-                c[f"الاسم المطابق - {lbl}"] = rec["الاسم المطابق"]
-                c[f"النسبة - {lbl}"] = rec[score_col]
-                c[f"الملاحظة - {lbl}"] = rec[note_col]
-                if dual:
-                    c[f"المدرسة - {lbl}"] = rec["المدرسة (المطابقة)"]
-                    c[f"نسبة المدرسة - {lbl}"] = rec["نسبة تطابق المدرسة"]
-                for col in sel:
-                    c[f"{col} - {lbl}"] = rec.get(col, "")
-            conflicts.append(c)
+            conflicts.append(conflict_row(a, b, "موجود في القاعدتين"))
         elif f1 or f2:
             rec, lbl = (a, label1) if f1 else (b, label2)
-            for col in base_cols:
-                if col in rec:
-                    out[col] = rec[col]
-            out["المصدر"] = lbl
-            for col in selected_columns:
-                if col in rec:
-                    out[col] = rec[col]
+            other, olbl = (b, label2) if f1 else (a, label1)
+            copy_rec(out, rec, lbl)
+            # مرشح قريب جداً في القاعدة الأخرى: يجب الانتباه له
+            if _is_candidate(other[note_col]) and _pct(other[score_col]) >= CROSS_DB_THRESHOLD:
+                out[note_col] = (f"⚠️ موجود في {lbl}، ويوجد اسم قريب جداً في {olbl}: "
+                                 f"{other['الاسم المطابق']} ({other[score_col]}) - تشابه بين {CONFLICT_MARK}")
+                conflicts.append(conflict_row(a, b, f"موجود في {lbl} وقريب في {olbl}"))
+            elif _is_candidate(other[note_col]):
+                # مرشح في القاعدة الأخرى أبعد قليلاً: معلومة فقط في «تشابه قريب» بدون تغيير اللون
+                extra = f"في {olbl} مرشح: {other['الاسم المطابق']} ({other[score_col]})"
+                out["تشابه قريب"] = " | ".join(x for x in (out.get("تشابه قريب", ""), extra) if x)
+        elif c1 or c2:
+            if c1 and c2:
+                rec, lbl = (a, label1) if _pct(a[score_col]) >= _pct(b[score_col]) else (b, label2)
+                copy_rec(out, rec, lbl)
+                out[note_col] = f"{NOTE_CANDIDATE} (مرشحان في {CONFLICT_MARK})"
+                conflicts.append(conflict_row(a, b, "مرشح قريب في القاعدتين"))
+            else:
+                rec, lbl = (a, label1) if c1 else (b, label2)
+                copy_rec(out, rec, lbl)
         else:
             out[note_col] = NOT_FOUND
             if dual:
                 out["ملاحظة المدرسة"] = NOT_FOUND
+            near = " | ".join(x for x in (a.get("تشابه قريب", ""), b.get("تشابه قريب", "")) if x)
+            out["تشابه قريب"] = near
         rows.append(out)
 
     results = pd.DataFrame(rows, columns=out_cols)
@@ -456,6 +663,7 @@ GREEN = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
 YELLOW = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
 ORANGE = PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")
 PURPLE = PatternFill(start_color="E1BEE7", end_color="E1BEE7", fill_type="solid")
+BLUE = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")   # ❔ مرشح قريب
 
 
 def _autofit(ws):
@@ -475,8 +683,9 @@ def _color_sheet(ws, dual):
         school_val = str(row[si].value) if si is not None else ""
         if CONFLICT_MARK in name_val:
             fill = PURPLE
+        elif "❔" in name_val:
+            fill = BLUE
         elif dual:
-            # نفس ألوان to_excel_dual الأصلية
             if "⚠️" in name_val or "⚠️" in school_val:
                 fill = ORANGE
             elif "✅" in name_val and "✅" in school_val:
@@ -486,7 +695,6 @@ def _color_sheet(ws, dual):
             else:
                 fill = RED
         else:
-            # نفس ألوان to_excel_basic الأصلية (✅ بدون لون)
             if "⚠️" in name_val:
                 fill = ORANGE
             elif "❌" in name_val:
@@ -541,7 +749,7 @@ def to_excel_two_db(results, conflicts_df, common_df, dual):
     return output
 
 
-# ============ ملخص الإحصائيات (مشترك بين النسختين) ============
+# ============ ملخص الإحصائيات ============
 
 def summary(results, dual, two_db):
     nc = "ملاحظة الاسم" if dual else "ملاحظة"
@@ -550,13 +758,15 @@ def summary(results, dual, two_db):
     conflict = notes.str.contains(CONFLICT_MARK, regex=False)
     warn = notes.str.contains("⚠️", regex=False) & ~conflict
     ok = notes.str.contains("✅", regex=False)
+    cand = notes.str.contains("❔", regex=False) & ~conflict
     s["✅ متطابق" if not dual else "✅ تطابق الاسم"] = int(ok.sum())
     if dual:
         sch = results["ملاحظة المدرسة"].astype(str).str.contains("✅", regex=False)
         s["✅ تطابق المدرسة"] = int(sch.sum())
         s["🎯 تطابق الاثنين"] = int((ok & sch).sum())
-    s["⚠️ مكرر - تحقق يدوي"] = int(warn.sum())
+    s["⚠️ تحقق يدوي"] = int(warn.sum())
+    s["❔ مرشح قريب"] = int(cand.sum())
     if two_db:
-        s["🟣 موجود في القاعدتين"] = int(conflict.sum())
+        s["🟣 القاعدتين"] = int(conflict.sum())
     s["❌ غير متطابق"] = int(notes.str.contains("❌", regex=False).sum())
     return s
